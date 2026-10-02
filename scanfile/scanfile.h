@@ -1,3 +1,6 @@
+#pragma once
+
+#include <cstddef>
 #include <filesystem>
 #include <regex>
 
@@ -13,12 +16,24 @@ struct MarkdownRegex {
   static inline const std::regex emptyLine{R"(^\s*$)"};
 };
 
+/// @brief Результаты подсчета элементов разметки Markdown
+struct MarkdownStats {
+  size_t headersCount{0};     ///< Количество заголовков
+  size_t paragraphsCount{0};  ///< Количество абзацев
+  size_t listsCount{0};       ///< Количество списков (блоков)
+  size_t listItemsCount{0};   ///< Общее количество пунктов в списках
+};
+
 class Scanner {
 public:
   Scanner() = default;
   ~Scanner() = default;
 
+  /// @brief Проверка файла на соответствие синтаксису Markdown
   static bool checkValidation(const std::filesystem::path &path);
+
+  /// @brief Анализ содержимого файла: подсчет заголовков, абзацев и списков
+  static MarkdownStats analyzeMarkdown(const std::filesystem::path &path);
 
 private:
 };
