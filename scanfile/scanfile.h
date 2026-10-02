@@ -1,8 +1,5 @@
 #include <filesystem>
 #include <regex>
-#include <string>
-#include <string_view>
-#include <vector>
 
 namespace scanfile {
 
@@ -20,8 +17,6 @@ class Scanner {
 public:
   Scanner() = default;
   ~Scanner() = default;
-
-  void scanFile();
 
   static bool checkValidation(const std::filesystem::path &path);
 
