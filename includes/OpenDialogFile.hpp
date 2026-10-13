@@ -1,3 +1,5 @@
+#pragma once
+
 #include <Windows.h>
 #include <filesystem>
 
@@ -6,24 +8,22 @@ namespace fileDialog {
 /// @brief Функция вызова диалогового окна выбора файла
 /// @return Путь к выбранному файлу
 inline std::filesystem::path OpenFileDialog() {
-  OPENFILENAMEA ofn; /// Структура для хранения параметров диалогового окна
-  char szFile[MAX_PATH] = {0}; /// Массив для хранения пути к файлу
+  OPENFILENAMEW ofn; /// Структура для хранения параметров диалогового окна
+  wchar_t szFile[MAX_PATH] = {0}; /// Массив для хранения пути к файлу
 
   ZeroMemory(&ofn, sizeof(ofn)); /// Обнуление структуры
   ofn.lStructSize = sizeof(ofn); /// Размер структуры
   ofn.hwndOwner = NULL;          /// Владелец окна
   ofn.lpstrFile = szFile;        /// Пусть к файлу
-  ofn.nMaxFile = sizeof(szFile); /// Максимальный размер пути
+  ofn.nMaxFile = sizeof(szFile) / sizeof(wchar_t); /// Максимальный размер пути
   ofn.lpstrFilter =
-      "Text Files (*.txt)\0*.txt\0All Files (*.*)\0*.*\0"; /// Фильтр
-                                                           /// показываемых
-                                                           /// файлов
-  ofn.nFilterIndex = 2;           /// Индекс фильтра (1 = .txt)
+      L"Markdown & Text Files (*.md;*.txt)\0*.md;*.markdown;*.txt\0Markdown Files (*.md)\0*.md;*.markdown\0Text Files (*.txt)\0*.txt\0All Files (*.*)\0*.*\0";
+  ofn.nFilterIndex = 1;
   ofn.Flags = OFN_PATHMUSTEXIST   /// Путь должен существовать
               | OFN_FILEMUSTEXIST /// Файл должен существовать
               | OFN_NOCHANGEDIR;  /// Не менять текущую директорию
 
-  if (GetOpenFileNameA(&ofn)) {
+  if (GetOpenFileNameW(&ofn)) {
     return std::filesystem::path(szFile);
   }
   return {};
