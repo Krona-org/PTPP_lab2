@@ -7,6 +7,8 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 add_executable(file_analiz src/main.cpp
+    src/app/Application.h
+    src/app/Application.cpp
     src/scanfile/scanfile.h
     src/scanfile/scanfile.cpp
     src/checkuserdata/checkuserdata.h

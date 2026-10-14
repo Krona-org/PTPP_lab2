@@ -2,6 +2,7 @@
 
 #include <functional>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <string>
 #include <string_view>
@@ -9,6 +10,13 @@
 #include <vector>
 
 namespace menu {
+
+/// @brief Элемент меню с идентификатором, заголовком и функцией действия
+struct MenuItem {
+  int choice{0};
+  std::string title;
+  std::function<void()> action;
+};
 
 class ConsoleMenu {
 public:
@@ -18,12 +26,18 @@ public:
   /// @brief Установить заголовок меню
   void setTitle(std::string title) { title_ = std::move(title); }
 
-  /// @brief Установить список отображаемых пунктов меню
+  /// @brief Добавить пункт меню с привязкой действия
+  void addItem(int choice, std::string title, std::function<void()> action) {
+    items_.push_back({choice, std::move(title), action});
+    actions_[choice] = std::move(action);
+  }
+
+  /// @brief Установить список отображаемых пунктов меню (для обратной совместимости)
   void setOptions(std::vector<std::string_view> options) {
     options_ = std::move(options);
   }
 
-  /// @brief Единый метод привязки действия (лямбда, функция, метод любого класса)
+  /// @brief Единый метод привязки действия (для обратной совместимости)
   void bindAction(int choice, std::function<void()> action) {
     actions_[choice] = std::move(action);
   }
@@ -33,6 +47,7 @@ public:
 
 private:
   std::string title_{"--- Меню ---"};
+  std::vector<MenuItem> items_;
   std::vector<std::string_view> options_;
   std::map<int, std::function<void()>> actions_;
 };
@@ -42,15 +57,21 @@ inline void ConsoleMenu::showMenu(std::ostream &os, std::istream &is) {
 
   while (true) {
     os << "\n" << title_ << "\n";
-    for (const auto &option : options_) {
-      os << option << "\n";
+    if (!items_.empty()) {
+      for (const auto &item : items_) {
+        os << "  " << item.choice << ". " << item.title << "\n";
+      }
+    } else {
+      for (const auto &option : options_) {
+        os << option << "\n";
+      }
     }
     os << "Выберите пункт: ";
 
     // Проверка на корректность ввода числа
     if (!(is >> choice)) {
       is.clear();
-      is.ignore(10000, '\n');
+      is.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
       os << "Ошибка: введите корректный номер пункта!\n";
       continue;
     }
