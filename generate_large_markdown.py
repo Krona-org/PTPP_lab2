@@ -157,14 +157,14 @@ def main():
         "-o",
         "--output",
         type=Path,
-        default=Path("large_sample_16gb.md"),
-        help="Имя или путь к выходному файлу (по умолчанию: large_sample_16gb.md)",
+        default=Path("large_sample_3gb.md"),
+        help="Имя или путь к выходному файлу (по умолчанию: large_sample_5gb.md)",
     )
     parser.add_argument(
         "-s",
         "--size-gb",
         type=float,
-        default=16.0,
+        default=1.0,
         help="Размер файла в гигабайтах (по умолчанию: 16.0)",
     )
 

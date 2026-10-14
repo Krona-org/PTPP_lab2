@@ -2,3 +2,7 @@
 /build
 /CMakeLists.md
 /sample.md
+large_sample_*.md
+*.exe
+*.exe.old
+*.old

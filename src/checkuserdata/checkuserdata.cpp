@@ -115,12 +115,53 @@ std::string UserData::toString() const {
          phone + " " + email;
 }
 
-/// @brief Разбор строки на 6 полей анкеты
+/// @brief Разбор строки на 6 полей анкеты (поддерживает номера телефонов с пробелами)
 UserData UserDataProcessor::parseLine(const std::string &rawLine) {
   UserData data;
   std::istringstream iss(rawLine);
-  iss >> data.lastName >> data.firstName >> data.middleName >> data.birthDate >>
-      data.phone >> data.email;
+  std::vector<std::string> tokens;
+  std::string token;
+  while (iss >> token) {
+    tokens.push_back(token);
+  }
+
+  if (tokens.empty()) {
+    return data;
+  }
+
+  if (tokens.size() >= 6) {
+    data.lastName = tokens[0];
+    data.firstName = tokens[1];
+    data.middleName = tokens[2];
+    data.birthDate = tokens[3];
+
+    // Ищем токен email: по умолчанию последний токен, либо токен с '@'
+    size_t emailIdx = tokens.size() - 1;
+    for (size_t i = 4; i < tokens.size(); ++i) {
+      if (tokens[i].find('@') != std::string::npos) {
+        emailIdx = i;
+        break;
+      }
+    }
+
+    data.email = tokens[emailIdx];
+
+    // Все токены между датой рождения (индекс 3) и email - это телефон
+    std::string phone;
+    for (size_t i = 4; i < tokens.size(); ++i) {
+      if (i == emailIdx) continue;
+      if (!phone.empty()) phone += ' ';
+      phone += tokens[i];
+    }
+    data.phone = phone;
+  } else {
+    if (tokens.size() > 0) data.lastName = tokens[0];
+    if (tokens.size() > 1) data.firstName = tokens[1];
+    if (tokens.size() > 2) data.middleName = tokens[2];
+    if (tokens.size() > 3) data.birthDate = tokens[3];
+    if (tokens.size() > 4) data.phone = tokens[4];
+  }
+
   return data;
 }
 
