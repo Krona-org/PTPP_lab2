@@ -3,6 +3,7 @@
 #include "checkuserdata/checkuserdata.h"
 #include "scanfile/scanfile.h"
 
+#include <algorithm>
 #include <iostream>
 #include <limits>
 
@@ -102,7 +103,7 @@ void Application::onGenerateRandomUserData() {
   size_t count = promptCount("\nСколько случайных анкет сгенерировать? (по умолчанию 3): ", 3);
 
   std::cout << "\n=== Генерация и нормализация случайных анкет (п. 3.b, 3.c) ===\n";
-  auto dataset = userdata::UserDataProcessor::generateRandomDataset(count, true);
+  auto dataset = userdata::UserDataProcessor::generateRandomDataset(count);
 
   for (size_t i = 0; i < dataset.size(); ++i) {
     std::cout << "\n--- Анкета #" << (i + 1) << " ---\n";
@@ -126,6 +127,9 @@ void Application::onGenerateRandomUserData() {
 
 void Application::printMarkdownStats(const std::filesystem::path &filePath,
                                      const scanfile::MarkdownStats &stats) {
+  constexpr size_t kPreview = 20;    // элементов каждого типа в консоли
+  constexpr size_t kListPreview = 5; // пунктов каждого списка в консоли
+
   std::cout << "\n=== Результаты анализа файла: "
             << filePath.filename().u8string() << " ===\n";
   std::cout << "Статистика:\n";
@@ -134,54 +138,43 @@ void Application::printMarkdownStats(const std::filesystem::path &filePath,
   std::cout << "  - Списков:    " << stats.listsCount
             << " (пунктов в списках: " << stats.listItemsCount << ")\n\n";
 
-  // Вывод найденных элементов из STL-контейнеров (с ограничением вывода в консоль до 20 элементов для больших файлов)
-  static constexpr size_t MAX_CONSOLE_PRINT = 20;
+  // Выводит начало коллекции и пометку, сколько всего элементов найдено
+  auto printItems = [&](const char *title, const char *emptyMsg, const char *noun, size_t total,
+                        size_t stored, const auto &printOne) {
+    std::cout << title;
+    if (stored == 0) {
+      std::cout << "  " << emptyMsg << "\n";
+      return;
+    }
+    size_t shown = std::min(stored, kPreview);
+    for (size_t i = 0; i < shown; ++i) {
+      printOne(i);
+    }
+    if (total > shown) {
+      std::cout << "  ... [показано " << shown << " из " << total << " " << noun << "]\n";
+    }
+  };
 
-  std::cout << "--- Найденные заголовки (STL std::vector) ---\n";
-  if (stats.headers.empty()) {
-    std::cout << "  (заголовки не найдены)\n";
-  } else {
-    size_t count = std::min(stats.headers.size(), MAX_CONSOLE_PRINT);
-    for (size_t i = 0; i < count; ++i) {
-      std::cout << "  [" << (i + 1) << "] " << stats.headers[i] << "\n";
-    }
-    if (stats.headersCount > count) {
-      std::cout << "  ... [показано " << count << " из " << stats.headersCount << " заголовков]\n";
-    }
-  }
+  printItems("--- Найденные заголовки (STL std::vector) ---\n", "(заголовки не найдены)", "заголовков",
+             stats.headersCount, stats.headers.size(),
+             [&](size_t i) { std::cout << "  [" << (i + 1) << "] " << stats.headers[i] << "\n"; });
 
-  std::cout << "\n--- Найденные списки (STL std::vector) ---\n";
-  if (stats.lists.empty()) {
-    std::cout << "  (списки не найдены)\n";
-  } else {
-    size_t count = std::min(stats.lists.size(), MAX_CONSOLE_PRINT);
-    for (size_t i = 0; i < count; ++i) {
-      std::cout << "  Список #" << (i + 1) << " (" << stats.lists[i].size() << " пунктов):\n";
-      size_t itemCount = std::min(stats.lists[i].size(), size_t(5));
-      for (size_t j = 0; j < itemCount; ++j) {
-        std::cout << "    " << stats.lists[i][j] << "\n";
-      }
-      if (stats.lists[i].size() > itemCount) {
-        std::cout << "    ... [ещё " << (stats.lists[i].size() - itemCount) << " пунктов]\n";
-      }
-    }
-    if (stats.listsCount > count) {
-      std::cout << "  ... [показано " << count << " из " << stats.listsCount << " списков]\n";
-    }
-  }
+  printItems("\n--- Найденные списки (STL std::vector) ---\n", "(списки не найдены)", "списков",
+             stats.listsCount, stats.lists.size(), [&](size_t i) {
+               const auto &list = stats.lists[i];
+               std::cout << "  Список #" << (i + 1) << " (" << list.size() << " пунктов):\n";
+               size_t shown = std::min(list.size(), kListPreview);
+               for (size_t j = 0; j < shown; ++j) {
+                 std::cout << "    " << list[j] << "\n";
+               }
+               if (list.size() > shown) {
+                 std::cout << "    ... [ещё " << (list.size() - shown) << " пунктов]\n";
+               }
+             });
 
-  std::cout << "\n--- Найденные абзацы (STL std::vector) ---\n";
-  if (stats.paragraphs.empty()) {
-    std::cout << "  (абзацы не найдены)\n";
-  } else {
-    size_t count = std::min(stats.paragraphs.size(), MAX_CONSOLE_PRINT);
-    for (size_t i = 0; i < count; ++i) {
-      std::cout << "  [" << (i + 1) << "] " << stats.paragraphs[i] << "\n";
-    }
-    if (stats.paragraphsCount > count) {
-      std::cout << "  ... [показано " << count << " из " << stats.paragraphsCount << " абзацев]\n";
-    }
-  }
+  printItems("\n--- Найденные абзацы (STL std::vector) ---\n", "(абзацы не найдены)", "абзацев",
+             stats.paragraphsCount, stats.paragraphs.size(),
+             [&](size_t i) { std::cout << "  [" << (i + 1) << "] " << stats.paragraphs[i] << "\n"; });
 }
 
 size_t Application::promptCount(std::string_view prompt, size_t defaultValue) {

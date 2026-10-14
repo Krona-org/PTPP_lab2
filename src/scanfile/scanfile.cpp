@@ -1,312 +1,183 @@
 #include "scanfile.h"
 
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
 #include <windows.h>
-#include <algorithm>
-#include <filesystem>
-#include <fstream>
+
 #include <iostream>
-#include <system_error>
+#include <regex>
+#include <string_view>
 
 namespace scanfile {
+namespace {
 
-Scanner::Scanner() = default;
+/// @brief Шаблоны регулярных выражений
+namespace re {
+const std::regex header{R"(^(#{1,6})\s+(.*))"};
+const std::regex bulletList{R"(^\s*[-*+]\s+(.*))"};
+const std::regex numberList{R"(^\s*(\d+)\.\s+(.*))"};
+const std::regex codeBlock{R"(^```(\w*))"};
+const std::regex inlineLink{R"(\[([^\]]+)\]\(([^)]+)\))"};
+// Элементы других языков разметки и программный код вне блока ```
+const std::regex html{R"(<\/?(html|head|body|div|p|script|style|table|tr|td|span|h[1-6])\b[^>]*>)",
+                      std::regex::icase};
+const std::regex latex{R"(\\(documentclass|begin|section|subsection|usepackage)\b)"};
+const std::regex rawCode{R"(\w+\(.*\)|;\s*$)"};
+} // namespace re
 
-Scanner::Scanner(const std::filesystem::path &path) {
-  loadFile(path);
-}
-
-Scanner::~Scanner() {
-  cleanupMapping();
-}
-
-Scanner::Scanner(Scanner &&other) noexcept
-    : fileHandle_(other.fileHandle_),
-      mappingHandle_(other.mappingHandle_),
-      mappedData_(other.mappedData_),
-      isMapped_(other.isMapped_),
-      buffer_(std::move(other.buffer_)),
-      buffer_view_(other.buffer_view_),
-      fileSize_(other.fileSize_) {
-  other.fileHandle_ = nullptr;
-  other.mappingHandle_ = nullptr;
-  other.mappedData_ = nullptr;
-  other.isMapped_ = false;
-  other.buffer_view_ = {};
-  other.fileSize_ = 0;
-}
-
-Scanner &Scanner::operator=(Scanner &&other) noexcept {
-  if (this != &other) {
-    cleanupMapping();
-    fileHandle_ = other.fileHandle_;
-    mappingHandle_ = other.mappingHandle_;
-    mappedData_ = other.mappedData_;
-    isMapped_ = other.isMapped_;
-    buffer_ = std::move(other.buffer_);
-    buffer_view_ = other.buffer_view_;
-    fileSize_ = other.fileSize_;
-
-    other.fileHandle_ = nullptr;
-    other.mappingHandle_ = nullptr;
-    other.mappedData_ = nullptr;
-    other.isMapped_ = false;
-    other.buffer_view_ = {};
-    other.fileSize_ = 0;
+/// @brief Read-only отображение файла в память (Win32 Memory-Mapped File).
+/// В отличие от std::ifstream/std::getline работает с файлами любого размера (в т.ч. > 4 ГБ):
+/// данные подгружаются ОС постранично, ОЗУ под весь файл не требуется.
+class MappedFile {
+public:
+  explicit MappedFile(const std::filesystem::path &path) {
+    file_ = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+    LARGE_INTEGER size{};
+    if (file_ == INVALID_HANDLE_VALUE || !GetFileSizeEx(file_, &size)) {
+      return;
+    }
+    if (size.QuadPart == 0) { // пустой файл отобразить нельзя, но это не ошибка
+      ok_ = true;
+      return;
+    }
+    mapping_ = CreateFileMappingW(file_, nullptr, PAGE_READONLY, 0, 0, nullptr);
+    if (!mapping_) {
+      return;
+    }
+    if (auto *data = static_cast<const char *>(MapViewOfFile(mapping_, FILE_MAP_READ, 0, 0, 0))) {
+      view_ = {data, static_cast<size_t>(size.QuadPart)};
+      ok_ = true;
+    }
   }
-  return *this;
-}
 
-void Scanner::cleanupMapping() {
-  if (mappedData_) {
-    UnmapViewOfFile(mappedData_);
-    mappedData_ = nullptr;
+  ~MappedFile() {
+    if (!view_.empty()) UnmapViewOfFile(view_.data());
+    if (mapping_) CloseHandle(mapping_);
+    if (file_ != INVALID_HANDLE_VALUE) CloseHandle(file_);
   }
-  if (mappingHandle_) {
-    CloseHandle(static_cast<HANDLE>(mappingHandle_));
-    mappingHandle_ = nullptr;
-  }
-  if (fileHandle_ && fileHandle_ != INVALID_HANDLE_VALUE) {
-    CloseHandle(static_cast<HANDLE>(fileHandle_));
-    fileHandle_ = nullptr;
-  }
-  isMapped_ = false;
-}
 
-bool Scanner::loadFile(const std::filesystem::path &path) {
-  cleanupMapping();
-  buffer_.clear();
-  buffer_view_ = {};
-  fileSize_ = 0;
+  MappedFile(const MappedFile &) = delete;
+  MappedFile &operator=(const MappedFile &) = delete;
 
-  std::error_code ec;
-  fileSize_ = std::filesystem::file_size(path, ec);
-  if (ec) {
-    std::cerr << "Не удалось получить размер файла: " << ec.message() << "\n";
+  bool ok() const { return ok_; }
+  std::string_view data() const { return view_; }
+
+private:
+  HANDLE file_{INVALID_HANDLE_VALUE};
+  HANDLE mapping_{nullptr};
+  std::string_view view_;
+  bool ok_{false};
+};
+
+/// @brief Извлекает очередную строку из text без копирования (поддерживает \n и \r\n)
+bool nextLine(std::string_view &text, std::string_view &line) {
+  if (text.empty()) {
     return false;
   }
-
-  if (fileSize_ == 0) {
-    buffer_view_ = {};
-    return true;
+  size_t eol = text.find('\n');
+  if (eol == std::string_view::npos) {
+    eol = text.size();
   }
-
-  // Случай 1: Файл >= 4 ГБ -> Win32 Memory-Mapped File (лучшая практика из py_war)
-  if (fileSize_ >= MMF_THRESHOLD) {
-    HANDLE hFile = CreateFileW(
-        path.c_str(),
-        GENERIC_READ,
-        FILE_SHARE_READ,
-        nullptr,
-        OPEN_EXISTING,
-        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, // Подсказка ОС оптимизировать предвыборку страниц
-        nullptr);
-
-    if (hFile == INVALID_HANDLE_VALUE) {
-      std::cerr << "Ошибка CreateFileW для MMF: код " << GetLastError() << "\n";
-      return false;
-    }
-
-    // В 64-битной Windows передача 0 в максимальный размер берет текущий размер файла
-    HANDLE hMapping = CreateFileMappingW(hFile, nullptr, PAGE_READONLY, 0, 0, nullptr);
-    if (!hMapping) {
-      std::cerr << "Ошибка CreateFileMappingW для MMF: код " << GetLastError() << "\n";
-      CloseHandle(hFile);
-      return false;
-    }
-
-    const char *pData = static_cast<const char *>(MapViewOfFile(hMapping, FILE_MAP_READ, 0, 0, 0));
-    if (!pData) {
-      std::cerr << "Ошибка MapViewOfFile для MMF: код " << GetLastError() << "\n";
-      CloseHandle(hMapping);
-      CloseHandle(hFile);
-      return false;
-    }
-
-    fileHandle_ = hFile;
-    mappingHandle_ = hMapping;
-    mappedData_ = pData;
-    isMapped_ = true;
-
-    // buffer_view_ указывает прямо на отображенную виртуальную память
-    buffer_view_ = std::string_view(mappedData_, fileSize_);
-    return true;
+  line = text.substr(0, eol);
+  text.remove_prefix(eol < text.size() ? eol + 1 : eol);
+  if (!line.empty() && line.back() == '\r') {
+    line.remove_suffix(1);
   }
+  return true;
+}
 
-  // Случай 2: Файл < 4 ГБ -> Чтение в RAM
-  std::ifstream file(path, std::ios::binary);
-  if (!file.is_open()) {
+bool matches(std::string_view s, const std::regex &r) {
+  return std::regex_match(s.data(), s.data() + s.size(), r);
+}
+
+bool contains(std::string_view s, const std::regex &r) {
+  return std::regex_search(s.data(), s.data() + s.size(), r);
+}
+
+// Классификаторы строк. Перед регуляркой — дешёвая проверка символа,
+// чтобы не запускать std::regex на каждой из сотен миллионов строк.
+
+bool isBlank(std::string_view s) { return s.find_first_not_of(" \t\r\v\f") == std::string_view::npos; }
+
+bool isCodeFence(std::string_view s) { return s.substr(0, 3) == "```" && matches(s, re::codeBlock); }
+
+bool isHeader(std::string_view s) { return !s.empty() && s[0] == '#' && matches(s, re::header); }
+
+bool isListItem(std::string_view s) {
+  size_t i = s.find_first_not_of(" \t");
+  if (i == std::string_view::npos) {
     return false;
   }
-
-  try {
-    buffer_.resize(fileSize_);
-    file.read(buffer_.data(), static_cast<std::streamsize>(fileSize_));
-    buffer_view_ = buffer_;
-    isMapped_ = false;
-    return true;
-  } catch (const std::bad_alloc &) {
-    // В случае нехватки ОЗУ при выделении буфера переключаемся на MMF
-    HANDLE hFile = CreateFileW(
-        path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
-        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
-    if (hFile == INVALID_HANDLE_VALUE) return false;
-    HANDLE hMapping = CreateFileMappingW(hFile, nullptr, PAGE_READONLY, 0, 0, nullptr);
-    if (!hMapping) { CloseHandle(hFile); return false; }
-    const char *pData = static_cast<const char *>(MapViewOfFile(hMapping, FILE_MAP_READ, 0, 0, 0));
-    if (!pData) { CloseHandle(hMapping); CloseHandle(hFile); return false; }
-    fileHandle_ = hFile;
-    mappingHandle_ = hMapping;
-    mappedData_ = pData;
-    isMapped_ = true;
-    buffer_view_ = std::string_view(mappedData_, fileSize_);
-    return true;
-  }
+  char c = s[i];
+  if (c == '-' || c == '*' || c == '+') return matches(s, re::bulletList);
+  if (c >= '0' && c <= '9') return matches(s, re::numberList);
+  return false;
 }
+
+bool hasLink(std::string_view s) { return s.find('[') != std::string_view::npos && contains(s, re::inlineLink); }
+
+bool hasHtml(std::string_view s) { return s.find('<') != std::string_view::npos && contains(s, re::html); }
+
+bool hasLatex(std::string_view s) { return s.find('\\') != std::string_view::npos && contains(s, re::latex); }
+
+bool hasRawCode(std::string_view s) {
+  return s.find_first_of("(;") != std::string_view::npos && contains(s, re::rawCode);
+}
+
+} // namespace
 
 /// @brief Метод проверки на соответствие синтаксису Markdown
 /// @param path Путь к проверяемому файлу
 /// @return true, если файл соответствует синтаксису Markdown, иначе false
 bool Scanner::checkValidation(const std::filesystem::path &path) {
   if (path.extension() != ".md" && path.extension() != ".markdown") {
-    std::cout << "[Ошибка валидации]: Неверное расширение файла ("
-              << path.extension().string()
+    std::cout << "[Ошибка валидации]: Неверное расширение файла (" << path.extension().string()
               << "). Ожидается .md или .markdown!\n";
     return false;
   }
 
-  Scanner scanner;
-  if (!scanner.loadFile(path)) {
-    std::cout << "[Ошибка валидации]: Не удалось открыть/отобразить файл для чтения: "
-              << path.string() << "\n";
+  MappedFile file(path);
+  if (!file.ok()) {
+    std::cout << "[Ошибка валидации]: Не удалось открыть файл для чтения: " << path.string() << "\n";
     return false;
   }
 
-  std::string_view data = scanner.getBufferView();
-  if (data.empty()) {
+  std::string_view text = file.data();
+  if (text.empty()) {
     std::cout << "[Ошибка валидации]: Файл пуст!\n";
     return false;
   }
 
-  if (scanner.isMemoryMapped()) {
-    std::cout << "[Инфо]: Файл (" << (scanner.getFileSize() / (1024ULL * 1024 * 1024))
-              << " ГБ) успешно отображен через Win32 Memory-Mapped File (MMF).\n";
-  }
-
-  static const std::regex rawCodeRegex(R"(\w+\(.*\)|;\s*$)");
-  static const std::regex foreignHtmlRegex(
-      R"(<\/?(html|head|body|div|p|script|style|table|tr|td|span|h[1-6])\b[^>]*>)",
-      std::regex::icase);
-
   bool inCodeBlock = false;
   bool hasAnyMarkdown = false;
   size_t lineNumber = 0;
+  std::string_view line;
 
-  const char *p = data.data();
-  const char *end = p + data.size();
+  auto fail = [&](const char *reason) {
+    std::cout << "[Ошибка валидации] Строка " << lineNumber << ": " << reason << ": \"" << line << "\"\n";
+    return false;
+  };
 
-  while (p < end) {
-    const char *lineStart = p;
-    while (p < end && *p != '\n') {
-      ++p;
-    }
-    const char *lineEnd = p;
-    if (lineEnd > lineStart && *(lineEnd - 1) == '\r') {
-      --lineEnd;
-    }
-    if (p < end && *p == '\n') {
-      ++p;
-    }
-    lineNumber++;
+  while (nextLine(text, line)) {
+    ++lineNumber;
 
-    std::string_view line(lineStart, lineEnd - lineStart);
-
-    // Проверка на блок кода ```
-    if (line.size() >= 3 && line[0] == '`' && line[1] == '`' && line[2] == '`' &&
-        std::regex_match(line.data(), line.data() + line.size(), MarkdownRegex::codeBlock)) {
+    if (isCodeFence(line)) {
       inCodeBlock = !inCodeBlock;
       hasAnyMarkdown = true;
       continue;
     }
-
-    if (inCodeBlock) {
+    if (inCodeBlock || isBlank(line)) {
       continue;
     }
 
-    // Проверка на пустую строку
-    bool isEmpty = true;
-    for (char ch : line) {
-      if (ch != ' ' && ch != '\t' && ch != '\r' && ch != '\v' && ch != '\f') {
-        isEmpty = false;
-        break;
-      }
-    }
-    if (isEmpty) {
-      continue;
-    }
+    if (hasHtml(line)) return fail("обнаружен тег чужого языка разметки HTML");
+    if (hasLatex(line)) return fail("обнаружены команды чужого языка разметки LaTeX");
 
-    // Проверка на чужую разметку (HTML-документ или теги)
-    if (line.find('<') != std::string_view::npos) {
-      if (std::regex_search(line.data(), line.data() + line.size(), foreignHtmlRegex)) {
-        std::cout << "[Ошибка валидации] Строка " << lineNumber
-                  << ": обнаружен тег чужого языка разметки HTML: \"" << line
-                  << "\"\n";
-        return false;
-      }
-    }
-
-    // Проверка на чужую разметку (LaTeX)
-    if (line.find('\\') != std::string_view::npos) {
-      if (std::regex_search(line.data(), line.data() + line.size(), MarkdownRegex::latexCommand)) {
-        std::cout << "[Ошибка валидации] Строка " << lineNumber
-                  << ": обнаружены команды чужого языка разметки LaTeX: \""
-                  << line << "\"\n";
-        return false;
-      }
-    }
-
-    // Проверка стандартных элементов Markdown
-    bool isStandardMd = false;
-    if (!line.empty() && line[0] == '#') {
-      if (std::regex_match(line.data(), line.data() + line.size(), MarkdownRegex::header)) {
-        isStandardMd = true;
-      }
-    } else {
-      size_t nonSpace = line.find_first_not_of(" \t");
-      if (nonSpace != std::string_view::npos) {
-        char fc = line[nonSpace];
-        if ((fc == '-' || fc == '*' || fc == '+') &&
-            std::regex_match(line.data(), line.data() + line.size(), MarkdownRegex::bulletList)) {
-          isStandardMd = true;
-        } else if (fc >= '0' && fc <= '9' &&
-                   std::regex_match(line.data(), line.data() + line.size(), MarkdownRegex::numberList)) {
-          isStandardMd = true;
-        }
-      }
-    }
-
-    if (!isStandardMd && line.find('[') != std::string_view::npos && line.find(']') != std::string_view::npos) {
-      if (std::regex_search(line.data(), line.data() + line.size(), MarkdownRegex::inlineLink)) {
-        isStandardMd = true;
-      }
-    }
-
-    if (isStandardMd) {
+    if (isHeader(line) || isListItem(line) || hasLink(line)) {
       hasAnyMarkdown = true;
       continue;
     }
 
-    // Сырой исходный код вне блока ```
-    if (line.find('(') != std::string_view::npos || (!line.empty() && line.back() == ';') || line.find(';') != std::string_view::npos) {
-      if (std::regex_search(line.data(), line.data() + line.size(), rawCodeRegex)) {
-        std::cout << "Строка " << lineNumber
-                  << ": обнаружен программный код вне блока ```: \"" << line
-                  << "\"\n";
-        return false;
-      }
-    }
+    if (hasRawCode(line)) return fail("обнаружен программный код вне блока ```");
   }
 
   if (inCodeBlock) {
@@ -315,7 +186,8 @@ bool Scanner::checkValidation(const std::filesystem::path &path) {
   }
 
   if (!hasAnyMarkdown) {
-    std::cout << "Файл не содержит ни одного элемента разметки Markdown (заголовки, списки, ссылки, блоки кода)!\n";
+    std::cout << "Файл не содержит ни одного элемента разметки Markdown "
+                 "(заголовки, списки, ссылки, блоки кода)!\n";
     return false;
   }
 
@@ -326,142 +198,82 @@ bool Scanner::checkValidation(const std::filesystem::path &path) {
 /// @param path Путь к Markdown-файлу
 /// @return Структура со статистикой и найденными элементами MarkdownStats
 MarkdownStats Scanner::analyzeMarkdown(const std::filesystem::path &path) {
+  // Сколько элементов каждого типа сохранять в векторах. Без лимита файл в десятки ГБ
+  // исчерпает память (std::bad_alloc); счётчики при этом считают все элементы.
+  constexpr size_t kMaxStored = 50000;
+
   MarkdownStats stats;
-
-  if (path.empty()) {
-    return stats;
-  }
-
-  Scanner scanner;
-  if (!scanner.loadFile(path)) {
-    return stats;
-  }
-
-  std::string_view data = scanner.getBufferView();
-  if (data.empty()) {
-    return stats;
-  }
-
-  if (scanner.isMemoryMapped()) {
-    std::cout << "[Инфо]: Анализ файла (" << (scanner.getFileSize() / (1024ULL * 1024 * 1024))
-              << " ГБ) через Win32 Memory-Mapped File (MMF)...\n";
-  }
+  MappedFile file(path);
+  std::string_view text = file.data(); // пусто, если файл не открылся
 
   bool inCodeBlock = false;
   bool inList = false;
-  std::string currentParagraph;
-
-  // Ограничение на максимальное количество хранимых в STL-векторах строк
-  // для предотвращения переполнения памяти (std::bad_alloc) при файлах в несколько гигабайт
-  static constexpr size_t MAX_STORED_ELEMENTS = 50000;
+  bool storingList = false; // сохраняется ли текущий список в stats.lists
+  std::string paragraph;
 
   auto flushParagraph = [&]() {
-    if (!currentParagraph.empty()) {
-      stats.paragraphsCount++;
-      if (stats.paragraphs.size() < MAX_STORED_ELEMENTS) {
-        stats.paragraphs.push_back(currentParagraph);
-      }
-      currentParagraph.clear();
+    if (paragraph.empty()) {
+      return;
     }
+    if (stats.paragraphsCount++ < kMaxStored) {
+      stats.paragraphs.push_back(std::move(paragraph));
+    }
+    paragraph.clear();
   };
 
-  const char *p = data.data();
-  const char *end = p + data.size();
-
-  while (p < end) {
-    const char *lineStart = p;
-    while (p < end && *p != '\n') {
-      ++p;
-    }
-    const char *lineEnd = p;
-    if (lineEnd > lineStart && *(lineEnd - 1) == '\r') {
-      --lineEnd;
-    }
-    if (p < end && *p == '\n') {
-      ++p;
-    }
-
-    std::string_view line(lineStart, lineEnd - lineStart);
-
-    // Блок кода ```
-    if (line.size() >= 3 && line[0] == '`' && line[1] == '`' && line[2] == '`' &&
-        std::regex_match(line.data(), line.data() + line.size(), MarkdownRegex::codeBlock)) {
+  std::string_view line;
+  while (nextLine(text, line)) {
+    if (isCodeFence(line)) {
       flushParagraph();
       inCodeBlock = !inCodeBlock;
       inList = false;
       continue;
     }
-
     if (inCodeBlock) {
       continue;
     }
 
     // Пустая строка завершает текущий абзац и список
-    bool isEmpty = true;
-    for (char ch : line) {
-      if (ch != ' ' && ch != '\t' && ch != '\r' && ch != '\v' && ch != '\f') {
-        isEmpty = false;
-        break;
-      }
-    }
-    if (isEmpty) {
+    if (isBlank(line)) {
       flushParagraph();
       inList = false;
       continue;
     }
 
-    // Заголовок (#{1,6})
-    if (!line.empty() && line[0] == '#' &&
-        std::regex_match(line.data(), line.data() + line.size(), MarkdownRegex::header)) {
+    if (isHeader(line)) {
       flushParagraph();
-      stats.headersCount++;
-      if (stats.headers.size() < MAX_STORED_ELEMENTS) {
+      inList = false;
+      if (stats.headersCount++ < kMaxStored) {
         stats.headers.emplace_back(line);
       }
-      inList = false;
       continue;
     }
 
-    // Элемент списка (маркированный или нумерованный)
-    bool isListItem = false;
-    size_t nonSpace = line.find_first_not_of(" \t");
-    if (nonSpace != std::string_view::npos) {
-      char fc = line[nonSpace];
-      if ((fc == '-' || fc == '*' || fc == '+') &&
-          std::regex_match(line.data(), line.data() + line.size(), MarkdownRegex::bulletList)) {
-        isListItem = true;
-      } else if (fc >= '0' && fc <= '9' &&
-                 std::regex_match(line.data(), line.data() + line.size(), MarkdownRegex::numberList)) {
-        isListItem = true;
-      }
-    }
-
-    if (isListItem) {
+    if (isListItem(line)) {
       flushParagraph();
-      if (!inList) {
-        stats.listsCount++;
-        if (stats.lists.size() < MAX_STORED_ELEMENTS) {
-          stats.lists.push_back({}); // Начался новый список
-        }
+      if (!inList) { // начался новый список
         inList = true;
+        storingList = stats.listsCount++ < kMaxStored;
+        if (storingList) {
+          stats.lists.emplace_back();
+        }
       }
-      stats.listItemsCount++;
-      if (!stats.lists.empty() && stats.lists.back().size() < MAX_STORED_ELEMENTS) {
+      ++stats.listItemsCount;
+      if (storingList && stats.lists.back().size() < kMaxStored) {
         stats.lists.back().emplace_back(line);
       }
       continue;
     }
 
-    // Обычный текст - накапливается как абзац
+    // Обычный текст накапливается как абзац
     inList = false;
-    if (!currentParagraph.empty()) {
-      currentParagraph += " ";
+    if (!paragraph.empty()) {
+      paragraph += ' ';
     }
-    currentParagraph.append(line.data(), line.size());
+    paragraph += line;
   }
 
   flushParagraph();
-
   return stats;
 }
 

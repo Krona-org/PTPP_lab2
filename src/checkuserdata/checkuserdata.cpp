@@ -1,9 +1,7 @@
 #include "checkuserdata.h"
 
-#include <algorithm>
-#include <cwctype>
+#include <cctype>
 #include <fstream>
-#include <iomanip>
 #include <iostream>
 #include <random>
 #include <regex>
@@ -105,6 +103,11 @@ const std::vector<std::string> femaleMiddleNames = {
 const std::vector<std::string> emailDomains = {
     "pochta.ru", "mail.ru", "yandex.ru", "gmail.com", "bk.ru", "rambler.ru"};
 
+// Дополняет число ведущим нулём до двух знаков: 3 -> "03"
+std::string pad2(int value) {
+  return (value < 10 ? "0" : "") + std::to_string(value);
+}
+
 } // namespace
 
 std::string UserData::toString() const {
@@ -198,12 +201,7 @@ bool UserDataProcessor::normalizeBirthDate(const std::string &raw,
     return false;
   }
 
-  std::ostringstream oss;
-  oss << std::setw(2) << std::setfill('0') << day << "." << std::setw(2)
-      << std::setfill('0') << month << "." << std::setw(4) << std::setfill('0')
-      << year;
-
-  normalized = oss.str();
+  normalized = pad2(day) + "." + pad2(month) + "." + std::to_string(year);
   return true;
 }
 
@@ -292,19 +290,6 @@ bool UserDataProcessor::normalizeAndValidate(const UserData &input,
   return ok;
 }
 
-/// @brief Нормализация строки целиком
-bool UserDataProcessor::normalizeLine(const std::string &rawLine,
-                                      std::string &normalizedLine,
-                                      std::vector<std::string> &errors) {
-  UserData raw = parseLine(rawLine);
-  UserData normalized;
-  if (normalizeAndValidate(raw, normalized, errors)) {
-    normalizedLine = normalized.toString();
-    return true;
-  }
-  return false;
-}
-
 /// @brief 3.a. Функция ввода пользовательских данных из консоли
 UserData UserDataProcessor::inputUserData() {
   std::cout << "\n--- Ввод пользовательских данных ---\n";
@@ -347,134 +332,69 @@ UserData UserDataProcessor::inputUserData() {
 }
 
 /// @brief 3.c. Генератор случайных пользовательских данных со словарями
-UserData UserDataProcessor::generateRandomUserData(bool withFlaws) {
+UserData UserDataProcessor::generateRandomUserData() {
   static std::mt19937 rng(std::random_device{}());
+  auto rnd = [](int from, int to) { return std::uniform_int_distribution<int>(from, to)(rng); };
+  auto pick = [&](const std::vector<std::string> &v) { return v[rnd(0, static_cast<int>(v.size()) - 1)]; };
 
-  bool isMale = std::bernoulli_distribution(0.5)(rng);
-
-  const auto &lastNames = isMale ? maleLastNames : femaleLastNames;
-  const auto &firstNames = isMale ? maleFirstNames : femaleFirstNames;
-  const auto &middleNames = isMale ? maleMiddleNames : femaleMiddleNames;
-
-  std::uniform_int_distribution<size_t> lastDist(0, lastNames.size() - 1);
-  std::uniform_int_distribution<size_t> firstDist(0, firstNames.size() - 1);
-  std::uniform_int_distribution<size_t> midDist(0, middleNames.size() - 1);
-  std::uniform_int_distribution<size_t> domainDist(0, emailDomains.size() - 1);
-
-  std::string lName = lastNames[lastDist(rng)];
-  std::string fName = firstNames[firstDist(rng)];
-  std::string mName = middleNames[midDist(rng)];
-
-  // Генерация даты
-  std::uniform_int_distribution<int> yearDist(1980, 2006);
-  std::uniform_int_distribution<int> monthDist(1, 12);
-  std::uniform_int_distribution<int> dayDist(1, 28);
-
-  int year = yearDist(rng);
-  int month = monthDist(rng);
-  int day = dayDist(rng);
-
-  // Телефон
-  std::uniform_int_distribution<int> codeDist(900, 999);
-  std::uniform_int_distribution<int> num1Dist(100, 999);
-  std::uniform_int_distribution<int> num2Dist(10, 99);
-  std::uniform_int_distribution<int> num3Dist(10, 99);
-  int code = codeDist(rng);
-  int n1 = num1Dist(rng);
-  int n2 = num2Dist(rng);
-  int n3 = num3Dist(rng);
-
-  // Email
-  std::string domain = emailDomains[domainDist(rng)];
+  const bool isMale = rnd(0, 1) == 1;
 
   UserData user;
+  user.lastName = pick(isMale ? maleLastNames : femaleLastNames);
+  std::string fName = pick(isMale ? maleFirstNames : femaleFirstNames);
+  std::string mName = pick(isMale ? maleMiddleNames : femaleMiddleNames);
 
-  if (withFlaws) {
-    // Вносим реалистичные искажения регистра и опечатки (как в примере задания)
-    // Например: "Сидоров ИваН ПетРОви1ч"
-    std::wstring wFName = utf8ToWide(fName);
-    if (wFName.size() > 2) {
-      wFName.back() =
-          toUpperUnicode(wFName.back()); // последняя буква заглавная: "ИваН"
-      fName = wideToUtf8(wFName);
-    }
+  // Вносим реалистичные искажения регистра и опечатки (как в примере задания)
+  // Например: "Сидоров ИваН ПетРОви1ч"
+  std::wstring wFName = utf8ToWide(fName);
+  if (wFName.size() > 2) {
+    wFName.back() = toUpperUnicode(wFName.back()); // последняя буква заглавная: "ИваН"
+  }
+  user.firstName = wideToUtf8(wFName);
 
-    std::wstring wMName = utf8ToWide(mName);
-    if (wMName.size() > 4) {
-      wMName[3] = toUpperUnicode(wMName[3]);
-      wMName[4] = toUpperUnicode(wMName[4]);
-      // Добавляем случайную цифру-опечатку в отчество как в "ПетРОви1ч"
-      wMName.insert(wMName.end() - 1, L'1');
-      mName = wideToUtf8(wMName);
-    }
+  std::wstring wMName = utf8ToWide(mName);
+  if (wMName.size() > 4) {
+    wMName[3] = toUpperUnicode(wMName[3]);
+    wMName[4] = toUpperUnicode(wMName[4]);
+    wMName.insert(wMName.end() - 1, L'1'); // цифра-опечатка как в "ПетРОви1ч"
+  }
+  user.middleName = wideToUtf8(wMName);
 
-    // Случайный формат даты
-    int dateFmt = std::uniform_int_distribution<int>(0, 3)(rng);
-    std::ostringstream dateOss;
-    if (dateFmt == 0) {
-      // YYYY-MM-DD
-      dateOss << year << "-" << std::setw(2) << std::setfill('0') << month
-              << "-" << std::setw(2) << std::setfill('0') << day;
-    } else if (dateFmt == 1) {
-      // DD.MM.YYYY
-      dateOss << std::setw(2) << std::setfill('0') << day << "." << std::setw(2)
-              << std::setfill('0') << month << "." << year;
-    } else if (dateFmt == 2) {
-      // YYYY/MM/DD
-      dateOss << year << "/" << std::setw(2) << std::setfill('0') << month
-              << "/" << std::setw(2) << std::setfill('0') << day;
-    } else {
-      // DD/MM/YYYY
-      dateOss << std::setw(2) << std::setfill('0') << day << "/" << std::setw(2)
-              << std::setfill('0') << month << "/" << year;
-    }
-    user.birthDate = dateOss.str();
-
-    // Случайный формат телефона
-    int phoneFmt = std::uniform_int_distribution<int>(0, 3)(rng);
-    std::ostringstream phoneOss;
-    if (phoneFmt == 0) {
-      phoneOss << "+7" << code << "-" << n1 << "-" << n2 << n3;
-    } else if (phoneFmt == 1) {
-      phoneOss << "8 (" << code << ") " << n1 << "-" << n2 << "-" << n3;
-    } else if (phoneFmt == 2) {
-      phoneOss << "+7 " << code << " " << n1 << " " << n2 << " " << n3;
-    } else {
-      phoneOss << "8" << code << n1 << n2 << n3;
-    }
-    user.phone = phoneOss.str();
-
-    // Email со смешанным регистром
-    std::string emailPrefix = "user" + std::to_string(code);
-    if (emailPrefix.length() > 4) {
-      emailPrefix[0] = static_cast<char>(std::toupper(emailPrefix[0]));
-      emailPrefix[2] = static_cast<char>(std::toupper(emailPrefix[2]));
-    }
-    user.email = emailPrefix + "@" + domain;
-  } else {
-    std::ostringstream dateOss;
-    dateOss << std::setw(2) << std::setfill('0') << day << "." << std::setw(2)
-            << std::setfill('0') << month << "." << year;
-    user.birthDate = dateOss.str();
-    user.phone = "+7" + std::to_string(code) + std::to_string(n1) +
-                 std::to_string(n2) + std::to_string(n3);
-    user.email = "user" + std::to_string(code) + "@" + domain;
+  // Дата в случайном формате
+  const std::string y = std::to_string(rnd(1980, 2006));
+  const std::string m = pad2(rnd(1, 12));
+  const std::string d = pad2(rnd(1, 28));
+  switch (rnd(0, 3)) {
+  case 0: user.birthDate = y + "-" + m + "-" + d; break; // YYYY-MM-DD
+  case 1: user.birthDate = d + "." + m + "." + y; break; // DD.MM.YYYY
+  case 2: user.birthDate = y + "/" + m + "/" + d; break; // YYYY/MM/DD
+  default: user.birthDate = d + "/" + m + "/" + y; break; // DD/MM/YYYY
   }
 
-  user.lastName = lName;
-  user.firstName = fName;
-  user.middleName = mName;
+  // Телефон в случайном формате
+  const std::string code = std::to_string(rnd(900, 999));
+  const std::string n1 = std::to_string(rnd(100, 999));
+  const std::string n2 = std::to_string(rnd(10, 99));
+  const std::string n3 = std::to_string(rnd(10, 99));
+  switch (rnd(0, 3)) {
+  case 0: user.phone = "+7" + code + "-" + n1 + "-" + n2 + n3; break;
+  case 1: user.phone = "8 (" + code + ") " + n1 + "-" + n2 + "-" + n3; break;
+  case 2: user.phone = "+7 " + code + " " + n1 + " " + n2 + " " + n3; break;
+  default: user.phone = "8" + code + n1 + n2 + n3; break;
+  }
+
+  // Email со смешанным регистром: "UsEr923@..."
+  user.email = "UsEr" + code + "@" + pick(emailDomains);
 
   return user;
 }
 
 /// @brief Генерация массива случайных анкет
-std::vector<UserData> UserDataProcessor::generateRandomDataset(size_t count,
-                                                               bool withFlaws) {
+std::vector<UserData> UserDataProcessor::generateRandomDataset(size_t count) {
   std::vector<UserData> dataset;
   dataset.reserve(count);
   for (size_t i = 0; i < count; ++i) {
-    dataset.push_back(generateRandomUserData(withFlaws));
+    dataset.push_back(generateRandomUserData());
   }
   return dataset;
 }

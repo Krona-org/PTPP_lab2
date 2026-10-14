@@ -36,10 +36,6 @@ public:
   static bool normalizeAndValidate(const UserData &input, UserData &output,
                                    std::vector<std::string> &errors);
 
-  /// @brief Нормализация строки целиком (пример из задания: Сидоров ИваН ПетРОви1ч ...)
-  static bool normalizeLine(const std::string &rawLine, std::string &normalizedLine,
-                            std::vector<std::string> &errors);
-
   /// @brief Нормализация части ФИО (удаление цифр/мусора, регистр: первая заглавная)
   static bool normalizeNamePart(const std::string &raw, std::string &normalized);
 
@@ -52,12 +48,12 @@ public:
   /// @brief Нормализация email (валидация и нижний регистр)
   static bool normalizeEmail(const std::string &raw, std::string &normalized);
 
-  /// @brief 3.c. Генерация случайной анкеты с использованием словарей
-  /// @param withFlaws Добавлять ли реалистичные погрешности/различные форматы (для проверки п. 3.b)
-  static UserData generateRandomUserData(bool withFlaws = true);
+  /// @brief 3.c. Генерация случайной анкеты с использованием словарей.
+  /// Добавляет реалистичные погрешности и различные форматы (для проверки п. 3.b)
+  static UserData generateRandomUserData();
 
   /// @brief Генерация набора случайных анкет
-  static std::vector<UserData> generateRandomDataset(size_t count, bool withFlaws = true);
+  static std::vector<UserData> generateRandomDataset(size_t count);
 
   /// @brief Обработка файла с анкетами: валидация, нормализация и вывод
   static void processFile(const std::filesystem::path &filePath);
